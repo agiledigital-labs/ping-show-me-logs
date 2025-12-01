@@ -1,6 +1,6 @@
-use crate::errors::ShowMeErrors;
-use crate::trees::nodes::{node_id_to_script_config, NodeConfig, NodeData};
 use crate::NodeOutcomeEdge;
+use crate::errors::ShowMeErrors;
+use crate::trees::nodes::{NodeConfig, NodeData, node_id_to_script_config};
 use futures::future::JoinAll;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -51,6 +51,8 @@ pub enum NodeType {
   ProductPingOneProtectInitializeNode,
   #[serde(rename = "product-PingOneProtectResultNode")]
   ProductPingOneProtectResultNode,
+  #[serde(other)]
+  NewThing,
 }
 impl Display for NodeType {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -101,6 +103,9 @@ impl Display for NodeType {
         write!(f, "ProductPingOneProtectInitializeNode")
       }
       NodeType::ProductPingOneProtectResultNode => write!(f, "ProductPingOneProtectResultNode"),
+      _ => {
+        write!(f, "some new fancy things")
+      }
     }
   }
 }

@@ -1,8 +1,10 @@
+use crate::AppMutState;
+use crate::errors::ShowMeErrors;
+use actix_web::web::Data;
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use crate::errors::ShowMeErrors;
-
+use serde_json::Value;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
@@ -14,7 +16,6 @@ pub enum Level {
   Error,
 }
 
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeOutcomeInfo {
@@ -23,7 +24,6 @@ pub struct NodeOutcomeInfo {
   pub(crate) node_outcome: String,
   pub(crate) display_name: String,
 }
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -52,11 +52,19 @@ pub struct ResultingLog {
   source: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum GenericLog {
+  ResultingLog(ResultingLog),
+  Other(Value),
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Logs {
-  pub(crate) result: Vec<ResultingLog>,
-  paged_result_cooke: Option<String>,
+  pub(crate) result: Vec<GenericLog>,
+  pub paged_result_cooke: Option<String>,
+  result_count: Option<i32>,
   total_paged_results_policy: String,
   total_paged_results: i16,
   remaining_paged_results: i16,
@@ -67,7 +75,10 @@ impl Logs {
     let result = self
       .result
       .iter()
-      .filter(|t| t.payload.level == level)
+      .filter(|t| match t {
+        GenericLog::ResultingLog(tt) => tt.payload.level == level,
+        GenericLog::Other(_) => false,
+      })
       .cloned()
       .collect::<Vec<_>>()
       .clone();
@@ -75,23 +86,53 @@ impl Logs {
   }
 }
 
+pub(crate) async fn tail_logs(
+  client: &Client,
+  app_state: &Data<AppMutState>,
+  tail_header: Option<String>,
+  query_filter: Option<&str>,
+) -> Result<Logs, ShowMeErrors> {
+  let params = [
+    ("source", "am-everything,idm-everything"),
+    ("_queryFilter", query_filter.unwrap_or_else(|| "")),
+    ("_pagedResultCookie", &tail_header.unwrap_or("".to_string())),
+  ];
+
+  let url = &app_state.log;
+  let sec = &app_state.sec;
+  let key = &app_state.key;
+
+  let text = client
+    .get(format!("{url}/tail"))
+    .query(&params)
+    .header("x-api-key", key)
+    .header("x-api-secret", sec)
+    .send()
+    .await?
+    .text()
+    .await?;
+
+  let logs: Logs = serde_json::from_str(&text)?;
+
+  Ok(logs)
+}
+
 pub(crate) async fn get_logs(
   client: &Client,
+  app_state: &Data<AppMutState>,
   transaction_id: &str,
   query_filter: Option<&str>,
 ) -> Result<Logs, ShowMeErrors> {
   let params = [
     ("source", "am-everything,idm-everything"),
     ("transactionId", transaction_id),
-    (
-      "_queryFilter",
-      query_filter.unwrap_or_else(|| ""),
-    ),
+    ("_queryFilter", query_filter.unwrap_or_else(|| "")),
   ];
 
-  let url = std::env::var("SANDBOX")?;
-  let key = std::env::var("PING_KEY")?;
-  let sec = std::env::var("PING_SEC")?;
+  let url = &app_state.log;
+  let sec = &app_state.sec;
+  let key = &app_state.key;
+
   match client
     .get(url)
     .query(&params)

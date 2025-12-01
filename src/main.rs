@@ -1,23 +1,28 @@
 use crate::errors::ShowMeErrors;
+use crate::front::{am, idm, index};
+use crate::ping_logs::logs::{GenericLog, tail_logs};
 use crate::ping_logs::service::log_api;
 use crate::token::{Token, get_usable_token};
 use crate::trees::journeys::AuthenticationTreeList;
 use crate::trees::service::trees_api;
-use crate::workers::scripts::{RichScript, ScriptConfig,  list_scripts, get_rich_script};
-use actix_web::http::header::ContentType;
+use crate::workers::scripts::{ScriptConfig, list_scripts};
 use actix_web::rt::time::sleep;
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, mime, rt, web};
+use actix_web::{App, HttpServer, Responder, rt, web};
 use futures_util::StreamExt as _;
 use reqwest::Client;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
+use tantivy::schema::{Schema, TEXT};
+use tantivy::{Index, IndexReader, ReloadPolicy, doc};
+use tempfile::TempDir;
 
 mod errors;
+mod front;
 mod ping_logs;
 mod token;
 mod trees;
+mod watcher;
 mod workers;
 
 struct AppMutState {
@@ -30,72 +35,10 @@ struct AppMutState {
   key: String,
   log: String,
   script_config: Mutex<HashMap<String, ScriptConfig>>,
+  reader: IndexReader,
 }
 // this could be done with rust embed
-async fn index(req: HttpRequest) -> Result<HttpResponse, ShowMeErrors> {
-  let path: PathBuf = req
-    .match_info()
-    .query("filename")
-    .parse()
-    .map_err(|_| ShowMeErrors::ParsingUiPath)?;
-  Ok(match path.to_str() {
-    Some(pp) => {
-      println!("{}", pp);
-      if pp.eq("") || pp.eq("/") {
-        HttpResponse::Ok()
-          .content_type(ContentType::html())
-          .body(include_str!(concat!("..", "/", "ui/dist/index.html")))
-      } else if pp.ends_with("js") {
-        HttpResponse::Ok()
-          .content_type(mime::APPLICATION_JAVASCRIPT)
-          .body(include_str!(concat!("..", "/", env!("JS"))))
-      } else if pp.ends_with("css") {
-        HttpResponse::Ok()
-          .content_type("text/css")
-          .body(include_str!(concat!("..", "/", env!("CSS"))))
-      } else if pp.ends_with("vite.svg") {
-        HttpResponse::Ok()
-          .content_type(ContentType::octet_stream())
-          .body(include_str!(concat!("..", "/", "ui/dist/vite.svg")))
-      } else {
-        HttpResponse::NotFound().body("")
-      }
-    }
-    _ => HttpResponse::NotFound().body(""),
-  })
-}
-
-#[get("/idm")]
-async fn idm(data: web::Data<AppMutState>) -> Result<String, ShowMeErrors> {
-  let client = Client::new();
-  let metrics = &*client
-    .get(format!("{}/monitoring/prometheus/idm", &data.token.dom,))
-    .header("x-api-key", &data.key)
-    .header("x-api-secret", &data.sec)
-    .send()
-    .await?
-    .text()
-    .await?;
-
-  Ok(metrics.to_string())
-}
-
-#[get("/am")]
-async fn am(data: web::Data<AppMutState>) -> Result<String, ShowMeErrors> {
-  let client = Client::new();
-  let metrics = client
-    .get(format!("{}/monitoring/prometheus/am", &data.token.dom,))
-    .header("x-api-key", &data.key)
-    .header("x-api-secret", &data.sec)
-    .send()
-    .await?
-    .text()
-    .await?;
-
-  Ok(metrics.to_string())
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct NodeOutcomeEdge {
   name: String,
   outcome: String,
@@ -114,9 +57,23 @@ async fn main() -> Result<(), ShowMeErrors> {
 
   let authentication_tree: AuthenticationTreeList = serde_json::from_slice(&client.get(format!("{}/am/json/realms/root/realms/alpha/realm-config/authentication/authenticationtrees/trees?_queryFilter=true", token.dom, )).header("authorization", format!("Bearer {}", token_str)).send().await?.bytes().await?)?;
 
-  let url = std::env::var("SANDBOX")?;
+  let url = std::env::var("LOGS_ENDPOINT")?;
   let key = std::env::var("PING_KEY")?;
   let sec = std::env::var("PING_SEC")?;
+
+  let index_path = TempDir::new()?;
+  let mut schema_builder = Schema::builder();
+
+  schema_builder.add_text_field("transactionId", TEXT);
+
+  let schema = schema_builder.build();
+  let search_index = Index::create_in_dir(&index_path, schema.clone())?;
+
+  let reader = search_index
+    .reader_builder()
+    .reload_policy(ReloadPolicy::OnCommitWithDelay)
+    .try_into()?;
+
   let state = web::Data::new(AppMutState {
     transaction_id: Mutex::new(String::new()),
     authentication_tree,
@@ -127,6 +84,7 @@ async fn main() -> Result<(), ShowMeErrors> {
     key,
     log: url,
     script_config: Mutex::new(HashMap::new()),
+    reader,
   });
 
   let data = state.clone();
@@ -147,11 +105,42 @@ async fn main() -> Result<(), ShowMeErrors> {
       // Otherwise this lock would only go out of scope when the sleep endds.
       drop(sct);
 
-      sleep(Duration::from_secs(30)).await;
+      sleep(Duration::from_secs(300)).await;
     }
     Ok::<(), ShowMeErrors>(())
   });
 
+  let tail_logs_data = state.clone();
+  rt::spawn(async move {
+    let client = Client::new();
+    let mut cookie: Option<String> = None;
+    let transaction_id_schema = schema.get_field("transactionId")?;
+    let mut index_writer = search_index.writer(50_000_000)?;
+    loop {
+      let logs = tail_logs(&client, &tail_logs_data, cookie, None).await?;
+
+      cookie = logs.paged_result_cooke;
+
+      println!("{:?}", cookie);
+      let docs = logs
+        .result
+        .iter()
+        .map(|t| {
+          match t {
+            GenericLog::ResultingLog(t) => {
+              index_writer.add_document(doc!(transaction_id_schema => t.payload.transaction_id))?;
+            }
+            _t => {}
+          }
+          Ok(())
+        })
+        .collect::<Result<Vec<()>, ShowMeErrors>>();
+      let stmp = index_writer.commit()?;
+      println!("{:?}", stmp);
+      sleep(Duration::from_secs(2)).await;
+    }
+    Ok::<(), ShowMeErrors>(())
+  });
 
   HttpServer::new(move || {
     let cors = actix_cors::Cors::permissive().allow_any_header();

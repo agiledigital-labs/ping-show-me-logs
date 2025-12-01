@@ -1,6 +1,7 @@
-use std::env::VarError;
 use actix_web::error;
 use actix_web::http::StatusCode;
+use std::env::VarError;
+use tantivy::TantivyError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -29,6 +30,8 @@ pub enum ShowMeErrors {
   TokenCreateKey(#[from] jsonwebtoken::errors::Error),
   #[error("Actix Web Error")]
   ActixWs(#[from] actix_web::Error),
+  #[error("Log Search Error")]
+  TrivyError(#[from] TantivyError),
 }
 
 impl error::ResponseError for ShowMeErrors {

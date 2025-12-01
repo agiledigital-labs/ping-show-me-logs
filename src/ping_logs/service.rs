@@ -1,11 +1,10 @@
+use crate::AppMutState;
 use crate::errors::ShowMeErrors;
-use crate::ping_logs::logs::{get_logs, Level, Logs};
-use crate::{AppMutState };
+use crate::ping_logs::logs::{Level, Logs, get_logs};
 use actix_web::web::Query;
-use actix_web::{get, post, web, Responder};
+use actix_web::{Responder, get, post, web};
 use reqwest::Client;
 use serde::Deserialize;
-
 
 #[derive(Debug, Deserialize, Clone)]
 struct WatchFr {
@@ -31,6 +30,7 @@ struct ScriptLogs {
 async fn script_logs(
   path: web::Path<ScriptLogs>,
   query: Query<LogsRequest>,
+  data: web::Data<AppMutState>,
 ) -> Result<web::Json<Logs>, ShowMeErrors> {
   let formatted_query = format!(
     "/payload/logger sw \"scripts.AUTHENTICATION_TREE_DECISION_NODE.{}\"",
@@ -39,7 +39,7 @@ async fn script_logs(
 
   let query_filter = Some(formatted_query.as_str());
 
-  match get_logs(&Client::new(), &path.fr_id, query_filter).await {
+  match get_logs(&Client::new(), &data, &path.fr_id, query_filter).await {
     Ok(ll) => Ok(match query.filters.clone() {
       None => web::Json(ll),
       Some(filter) => match filter {
@@ -67,6 +67,7 @@ struct LogsRequest {
 async fn logs(
   fr_id: web::Path<String>,
   query: Query<LogsRequest>,
+  data: web::Data<AppMutState>,
 ) -> Result<web::Json<Logs>, ShowMeErrors> {
   let id = fr_id.into_inner();
 
@@ -90,7 +91,7 @@ async fn logs(
 
   let query_filter = defined_filters.clone().join(" or ");
 
-  match get_logs(&Client::new(), &id, Some(query_filter.as_str())).await {
+  match get_logs(&Client::new(), &data, &id, Some(query_filter.as_str())).await {
     Ok(ll) => Ok(match query.filters.clone() {
       None => web::Json(ll),
       Some(filter) => match filter {
@@ -113,7 +114,7 @@ async fn get_watch(
   query: Query<LogsRequest>,
 ) -> Result<web::Json<Logs>, ShowMeErrors> {
   Ok(match data.transaction_id.lock() {
-    Ok(id) => match get_logs(&Client::new(), &*id, None).await {
+    Ok(id) => match get_logs(&Client::new(), &data, &*id, None).await {
       Ok(ll) => match query.filters.clone() {
         None => web::Json(ll),
         Some(filter) => match filter {
