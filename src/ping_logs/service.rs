@@ -5,6 +5,10 @@ use actix_web::web::Query;
 use actix_web::{Responder, get, post, web};
 use reqwest::Client;
 use serde::Deserialize;
+use serde_json::Value;
+use tantivy::collector::TopDocs;
+use tantivy::query::FuzzyTermQuery;
+use tantivy::{Document, TantivyDocument, Term, doc};
 
 #[derive(Debug, Deserialize, Clone)]
 struct WatchFr {
@@ -24,6 +28,52 @@ enum Filters {
 struct ScriptLogs {
   fr_id: String,
   script_id: String,
+}
+
+#[get("/transaction/ids")]
+async fn list_transaction_ids(
+  data: web::Data<AppMutState>,
+) -> Result<web::Json<Vec<String>>, crate::errors::ShowMeErrors> {
+  let rolling_list: Vec<String> = data
+    .rolling_id_list
+    .lock()
+    .map_err(|_| ShowMeErrors::IdLockError("failed".to_string()))?
+    .iter()
+    .cloned()
+    .collect();
+
+  dbg!(&rolling_list);
+
+  Ok(web::Json(rolling_list))
+}
+
+#[get("/transaction/demo/search")]
+async fn searcher_poc(data: web::Data<AppMutState>) -> Result<web::Json<Value>, ShowMeErrors> {
+  let sercher = data.reader.searcher();
+
+  let quere = FuzzyTermQuery::new(
+    Term::from_field_text(data.schema.get_field("transactionId")?, ""),
+    2,
+    true,
+  );
+
+  let docs = sercher
+    .search(&quere, &TopDocs::with_limit(25))?
+    .iter()
+    .map(|(_, t)| {
+      println!("{:?}", &t);
+      sercher
+        .doc::<TantivyDocument>(*t)
+        .unwrap()
+        .to_json(&data.schema)
+    })
+    .collect::<Vec<String>>();
+
+  dbg!(docs);
+
+  let test: Value = serde_json::from_str("[]")?;
+
+  Ok(web::Json(test))
 }
 
 #[get("/{fr_id}/script/{script_id}")]
@@ -157,6 +207,7 @@ pub fn log_api(cfg: &mut web::ServiceConfig) {
       .service(logs)
       .service(get_watch)
       .service(logs)
+      .service(list_transaction_ids)
       .service(set_watch),
   );
 }

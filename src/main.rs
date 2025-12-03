@@ -10,10 +10,10 @@ use actix_web::rt::time::sleep;
 use actix_web::{App, HttpServer, Responder, rt, web};
 use futures_util::StreamExt as _;
 use reqwest::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
-use tantivy::schema::{Schema, TEXT};
+use tantivy::schema::{STORED, Schema, TEXT};
 use tantivy::{Index, IndexReader, ReloadPolicy, doc};
 use tempfile::TempDir;
 
@@ -24,6 +24,29 @@ mod token;
 mod trees;
 mod watcher;
 mod workers;
+
+const MAX_SIZE: usize = 50;
+
+fn add_to_rolling_buffer(deque: &Mutex<VecDeque<String>>, value: String) -> Option<()> {
+  match deque
+    .lock()
+    .map_err(|_| ShowMeErrors::IdLockError("Failed to lock id vec".to_string()))
+  {
+    Ok(mut locked_queue) => {
+      if !locked_queue.contains(&value) {
+        if locked_queue.len() == MAX_SIZE {
+          locked_queue.pop_front();
+        }
+        println!("{}, {}", locked_queue.len(), &value);
+        locked_queue.push_back(value);
+        Some(())
+      } else {
+        None
+      }
+    }
+    Err(_) => None,
+  }
+}
 
 struct AppMutState {
   transaction_id: Mutex<String>,
@@ -36,7 +59,10 @@ struct AppMutState {
   log: String,
   script_config: Mutex<HashMap<String, ScriptConfig>>,
   reader: IndexReader,
+  schema: Schema,
+  rolling_id_list: Mutex<VecDeque<String>>,
 }
+
 // this could be done with rust embed
 #[derive(Debug, Default)]
 struct NodeOutcomeEdge {
@@ -64,10 +90,11 @@ async fn main() -> Result<(), ShowMeErrors> {
   let index_path = TempDir::new()?;
   let mut schema_builder = Schema::builder();
 
-  schema_builder.add_text_field("transactionId", TEXT);
+  schema_builder.add_text_field("transactionId", TEXT | STORED);
 
   let schema = schema_builder.build();
   let search_index = Index::create_in_dir(&index_path, schema.clone())?;
+  let transaction_id_schema = schema.get_field("transactionId")?;
 
   let reader = search_index
     .reader_builder()
@@ -85,6 +112,8 @@ async fn main() -> Result<(), ShowMeErrors> {
     log: url,
     script_config: Mutex::new(HashMap::new()),
     reader,
+    schema,
+    rolling_id_list: Mutex::new(VecDeque::new()),
   });
 
   let data = state.clone();
@@ -114,7 +143,6 @@ async fn main() -> Result<(), ShowMeErrors> {
   rt::spawn(async move {
     let client = Client::new();
     let mut cookie: Option<String> = None;
-    let transaction_id_schema = schema.get_field("transactionId")?;
     let mut index_writer = search_index.writer(50_000_000)?;
     loop {
       let logs = tail_logs(&client, &tail_logs_data, cookie, None).await?;
@@ -126,17 +154,21 @@ async fn main() -> Result<(), ShowMeErrors> {
         .result
         .iter()
         .map(|t| {
-          match t {
+          let res = match t {
             GenericLog::ResultingLog(t) => {
-              index_writer.add_document(doc!(transaction_id_schema => t.payload.transaction_id))?;
+              index_writer.add_document(
+                doc!(transaction_id_schema => t.payload.transaction_id.split_at(36).0),
+              )?;
+              let id = t.payload.transaction_id.split_at(36).0.to_string();
+              let is_new = add_to_rolling_buffer(&tail_logs_data.rolling_id_list, id.clone());
+              if is_new.is_some() { Some(id) } else { None }
             }
-            _t => {}
-          }
-          Ok(())
+            _t => None,
+          };
+          Ok(res)
         })
-        .collect::<Result<Vec<()>, ShowMeErrors>>();
+        .collect::<Result<Vec<Option<String>>, ShowMeErrors>>()?;
       let stmp = index_writer.commit()?;
-      println!("{:?}", stmp);
       sleep(Duration::from_secs(2)).await;
     }
     Ok::<(), ShowMeErrors>(())

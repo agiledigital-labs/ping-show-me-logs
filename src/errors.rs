@@ -2,6 +2,7 @@ use actix_web::error;
 use actix_web::http::StatusCode;
 use std::env::VarError;
 use tantivy::TantivyError;
+use tantivy::query::QueryParserError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -32,6 +33,10 @@ pub enum ShowMeErrors {
   ActixWs(#[from] actix_web::Error),
   #[error("Log Search Error")]
   TrivyError(#[from] TantivyError),
+  #[error("db query parsing error")]
+  QueryParserError(#[from] QueryParserError),
+  #[error("id list lock error")]
+  IdLockError(String),
 }
 
 impl error::ResponseError for ShowMeErrors {
