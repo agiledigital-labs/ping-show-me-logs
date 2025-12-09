@@ -6,8 +6,9 @@ use crate::token::{Token, get_usable_token};
 use crate::trees::journeys::AuthenticationTreeList;
 use crate::trees::service::trees_api;
 use crate::workers::scripts::{ScriptConfig, list_scripts};
+use crate::ws_server::{LogsServer, LogsServerHandle};
 use actix_web::rt::time::sleep;
-use actix_web::{App, HttpServer, Responder, rt, web};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, rt, web};
 use futures_util::StreamExt as _;
 use reqwest::Client;
 use std::collections::{HashMap, VecDeque};
@@ -16,6 +17,7 @@ use std::time::Duration;
 use tantivy::schema::{STORED, Schema, TEXT};
 use tantivy::{Index, IndexReader, ReloadPolicy, doc};
 use tempfile::TempDir;
+use tokio::{spawn, try_join};
 
 mod errors;
 mod front;
@@ -24,9 +26,18 @@ mod token;
 mod trees;
 mod watcher;
 mod workers;
+mod ws_handler;
+mod ws_server;
 
 const MAX_SIZE: usize = 50;
+/// Connection ID.
+pub type ConnId = u64;
 
+/// Room ID.
+pub type RoomId = String;
+
+/// Message sent to a room/client.
+pub type Msg = String;
 fn add_to_rolling_buffer(deque: &Mutex<VecDeque<String>>, value: String) -> Option<()> {
   match deque
     .lock()
@@ -68,6 +79,20 @@ struct AppMutState {
 struct NodeOutcomeEdge {
   name: String,
   outcome: String,
+}
+
+/// Handshake and start the websocket handler with heartbeats.
+async fn ws_server(
+  req: HttpRequest,
+  stream: web::Payload,
+  server: web::Data<LogsServerHandle>,
+) -> Result<HttpResponse, ShowMeErrors> {
+  let (res, session, msg_stream) = actix_ws::handle(&req, stream)?;
+
+  // spawn websocket handler (and don't await it) so that the response is returned immediately
+  tokio::task::spawn_local(ws_handler::chat_ws((**server).clone(), session, msg_stream));
+
+  Ok(res)
 }
 
 #[actix_web::main]
@@ -174,21 +199,27 @@ async fn main() -> Result<(), ShowMeErrors> {
     Ok::<(), ShowMeErrors>(())
   });
 
-  HttpServer::new(move || {
+  let (chat_server, server_tx) = LogsServer::new();
+  let chat_server = spawn(chat_server.run());
+
+  let http_server = HttpServer::new(move || {
     let cors = actix_cors::Cors::permissive().allow_any_header();
     App::new()
       .app_data(state.clone())
+      .app_data(web::Data::new(server_tx.clone()))
       .wrap(cors)
       .service(
         web::scope("/api")
           .configure(trees_api)
           .configure(log_api)
+          .service(web::resource("/ws").route(web::get().to(ws_server)))
           .service(web::scope("/monitoring").service(am).service(idm)),
       )
       .route("/{filename:.*}", web::get().to(index))
   })
   .bind(("0.0.0.0", 8081))?
-  .run()
-  .await?;
+  .run();
+
+  try_join!(http_server, async move { chat_server.await.unwrap() })?;
   Ok(())
 }
