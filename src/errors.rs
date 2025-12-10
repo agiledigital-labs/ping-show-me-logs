@@ -1,6 +1,7 @@
 use actix_web::error;
 use actix_web::http::StatusCode;
 use std::env::VarError;
+use std::io::ErrorKind;
 use tantivy::TantivyError;
 use tantivy::query::QueryParserError;
 use thiserror::Error;
@@ -51,5 +52,11 @@ impl error::ResponseError for ShowMeErrors {
       ShowMeErrors::TokenDefault(_) => StatusCode::INTERNAL_SERVER_ERROR,
       _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+  }
+}
+
+impl From<ShowMeErrors> for std::io::Error {
+  fn from(value: ShowMeErrors) -> Self {
+    Self::new(ErrorKind::Other, value.to_string())
   }
 }

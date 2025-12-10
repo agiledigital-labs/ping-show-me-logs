@@ -1,7 +1,8 @@
+use std::ops::Deref;
 use std::time::{Duration, Instant};
 
-use crate::ConnId;
 use crate::ws_server::LogsServerHandle;
+use crate::{ConnId, Msg, WsMsg};
 use actix_ws::AggregatedMessage;
 use futures_util::StreamExt as _;
 use tokio::{sync::mpsc, time::interval};
@@ -46,7 +47,8 @@ pub async fn chat_ws(
                     session.pong(&bytes).await.unwrap();
                 }
 
-                AggregatedMessage::Pong(_) => {
+                AggregatedMessage::Pong(t) => {
+                    println!("{}", format!("Go a pong message: {:?}", t));
                     last_heartbeat = Instant::now();
                 }
 
@@ -64,7 +66,7 @@ pub async fn chat_ws(
         }
 
         Some(chat_msg) = conn_rx.recv() => {
-             session.text(chat_msg).await.unwrap();
+             session.text(serde_json::to_string(&chat_msg).unwrap_or_default()).await.unwrap();
         }
 
         _ = interval.tick() => {
@@ -105,7 +107,7 @@ async fn process_text_msg(
       "/list" => {
         log::info!("conn {conn}: listing rooms");
 
-        let rooms = chat_server.list_rooms().await;
+        let rooms = chat_server.list_journeys().await;
 
         for room in rooms {
           session.text(room).await.unwrap();
@@ -116,7 +118,7 @@ async fn process_text_msg(
         Some(room) => {
           log::info!("conn {conn}: joining room {room}");
 
-          chat_server.join_room(conn, room).await;
+          chat_server.watch_journey(conn, room).await;
 
           session.text(format!("joined {room}")).await.unwrap();
         }
@@ -146,7 +148,7 @@ async fn process_text_msg(
   } else {
     // prefix message with our name, if assigned
     let msg = match name {
-      Some(name) => format!("{name}: {msg}"),
+      Some(name) => format!("thing {name}: {msg}"),
       None => msg.to_owned(),
     };
 

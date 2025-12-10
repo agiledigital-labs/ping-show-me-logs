@@ -8,7 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tantivy::collector::TopDocs;
 use tantivy::query::FuzzyTermQuery;
-use tantivy::{Document, TantivyDocument, Term, doc};
+use tantivy::schema::Schema;
+use tantivy::{Document, IndexReader, TantivyDocument, Term, doc};
 
 #[derive(Debug, Deserialize, Clone)]
 struct WatchFr {
@@ -48,11 +49,14 @@ async fn list_transaction_ids(
 }
 
 #[get("/transaction/demo/search")]
-async fn searcher_poc(data: web::Data<AppMutState>) -> Result<web::Json<Value>, ShowMeErrors> {
-  let sercher = data.reader.searcher();
+async fn searcher_poc(
+  data: web::Data<AppMutState>,
+  reader: web::Data<(IndexReader, Schema)>,
+) -> Result<web::Json<Value>, ShowMeErrors> {
+  let sercher = reader.0.searcher();
 
   let quere = FuzzyTermQuery::new(
-    Term::from_field_text(data.schema.get_field("transactionId")?, ""),
+    Term::from_field_text(reader.1.get_field("transactionId")?, ""),
     2,
     true,
   );
@@ -65,7 +69,7 @@ async fn searcher_poc(data: web::Data<AppMutState>) -> Result<web::Json<Value>, 
       sercher
         .doc::<TantivyDocument>(*t)
         .unwrap()
-        .to_json(&data.schema)
+        .to_json(&reader.1)
     })
     .collect::<Vec<String>>();
 

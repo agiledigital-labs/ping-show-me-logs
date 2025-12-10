@@ -1,6 +1,6 @@
 use crate::errors::ShowMeErrors;
 use crate::front::{am, idm, index};
-use crate::ping_logs::logs::{GenericLog, tail_logs};
+use crate::log_watcher::LogWatcher;
 use crate::ping_logs::service::log_api;
 use crate::token::{Token, get_usable_token};
 use crate::trees::journeys::AuthenticationTreeList;
@@ -11,16 +11,16 @@ use actix_web::rt::time::sleep;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, rt, web};
 use futures_util::StreamExt as _;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
-use tantivy::schema::{STORED, Schema, TEXT};
-use tantivy::{Index, IndexReader, ReloadPolicy, doc};
-use tempfile::TempDir;
+use tantivy::doc;
 use tokio::{spawn, try_join};
 
 mod errors;
 mod front;
+mod log_watcher;
 mod ping_logs;
 mod token;
 mod trees;
@@ -34,10 +34,48 @@ const MAX_SIZE: usize = 50;
 pub type ConnId = u64;
 
 /// Room ID.
-pub type RoomId = String;
+pub type JourneyId = String;
+pub type TransactionId = String;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TransactionIdWs {
+  id: TransactionId,
+  journey: JourneyId,
+}
+
+impl TransactionIdWs {
+  pub fn from_tuple((id, journey): (String, String)) -> Self {
+    Self { id, journey }
+  }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+enum WsMsg {
+  String(String),
+  TransactionIdWs(TransactionIdWs),
+}
+
+impl From<&str> for WsMsg {
+  fn from(value: &str) -> Self {
+    Self::String(value.to_string())
+  }
+}
+
+impl From<String> for WsMsg {
+  fn from(value: String) -> Self {
+    Self::String(value)
+  }
+}
+impl From<(TransactionId, JourneyId)> for WsMsg {
+  fn from(value: (TransactionId, JourneyId)) -> Self {
+    Self::TransactionIdWs(TransactionIdWs::from_tuple(value))
+  }
+}
 
 /// Message sent to a room/client.
-pub type Msg = String;
+pub type Msg = WsMsg;
+
 fn add_to_rolling_buffer(deque: &Mutex<VecDeque<String>>, value: String) -> Option<()> {
   match deque
     .lock()
@@ -69,8 +107,6 @@ struct AppMutState {
   key: String,
   log: String,
   script_config: Mutex<HashMap<String, ScriptConfig>>,
-  reader: IndexReader,
-  schema: Schema,
   rolling_id_list: Mutex<VecDeque<String>>,
 }
 
@@ -112,20 +148,6 @@ async fn main() -> Result<(), ShowMeErrors> {
   let key = std::env::var("PING_KEY")?;
   let sec = std::env::var("PING_SEC")?;
 
-  let index_path = TempDir::new()?;
-  let mut schema_builder = Schema::builder();
-
-  schema_builder.add_text_field("transactionId", TEXT | STORED);
-
-  let schema = schema_builder.build();
-  let search_index = Index::create_in_dir(&index_path, schema.clone())?;
-  let transaction_id_schema = schema.get_field("transactionId")?;
-
-  let reader = search_index
-    .reader_builder()
-    .reload_policy(ReloadPolicy::OnCommitWithDelay)
-    .try_into()?;
-
   let state = web::Data::new(AppMutState {
     transaction_id: Mutex::new(String::new()),
     authentication_tree,
@@ -136,8 +158,6 @@ async fn main() -> Result<(), ShowMeErrors> {
     key,
     log: url,
     script_config: Mutex::new(HashMap::new()),
-    reader,
-    schema,
     rolling_id_list: Mutex::new(VecDeque::new()),
   });
 
@@ -156,7 +176,7 @@ async fn main() -> Result<(), ShowMeErrors> {
 
       *sct = scripts;
 
-      // Otherwise this lock would only go out of scope when the sleep endds.
+      // Otherwise this lock would only go out of scope when the sleep ends.
       drop(sct);
 
       sleep(Duration::from_secs(300)).await;
@@ -164,49 +184,19 @@ async fn main() -> Result<(), ShowMeErrors> {
     Ok::<(), ShowMeErrors>(())
   });
 
-  let tail_logs_data = state.clone();
-  rt::spawn(async move {
-    let client = Client::new();
-    let mut cookie: Option<String> = None;
-    let mut index_writer = search_index.writer(50_000_000)?;
-    loop {
-      let logs = tail_logs(&client, &tail_logs_data, cookie, None).await?;
+  let (logs_server, server_tx) = LogsServer::new();
+  let watcher_state = state.clone();
+  let (watcher, reader, schema) = LogWatcher::new(server_tx.clone(), watcher_state)?;
+  let log_command_server = spawn(logs_server.run());
 
-      cookie = logs.paged_result_cooke;
-
-      println!("{:?}", cookie);
-      let docs = logs
-        .result
-        .iter()
-        .map(|t| {
-          let res = match t {
-            GenericLog::ResultingLog(t) => {
-              index_writer.add_document(
-                doc!(transaction_id_schema => t.payload.transaction_id.split_at(36).0),
-              )?;
-              let id = t.payload.transaction_id.split_at(36).0.to_string();
-              let is_new = add_to_rolling_buffer(&tail_logs_data.rolling_id_list, id.clone());
-              if is_new.is_some() { Some(id) } else { None }
-            }
-            _t => None,
-          };
-          Ok(res)
-        })
-        .collect::<Result<Vec<Option<String>>, ShowMeErrors>>()?;
-      let stmp = index_writer.commit()?;
-      sleep(Duration::from_secs(2)).await;
-    }
-    Ok::<(), ShowMeErrors>(())
-  });
-
-  let (chat_server, server_tx) = LogsServer::new();
-  let chat_server = spawn(chat_server.run());
+  let log_watcher = spawn(watcher.watch());
 
   let http_server = HttpServer::new(move || {
     let cors = actix_cors::Cors::permissive().allow_any_header();
     App::new()
       .app_data(state.clone())
       .app_data(web::Data::new(server_tx.clone()))
+      .app_data(web::Data::new((reader.clone(), schema.clone())))
       .wrap(cors)
       .service(
         web::scope("/api")
@@ -220,6 +210,10 @@ async fn main() -> Result<(), ShowMeErrors> {
   .bind(("0.0.0.0", 8081))?
   .run();
 
-  try_join!(http_server, async move { chat_server.await.unwrap() })?;
+  try_join!(
+    http_server,
+    async move { log_watcher.await.unwrap() },
+    async move { log_command_server.await.unwrap() }
+  )?;
   Ok(())
 }

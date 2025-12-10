@@ -1,5 +1,12 @@
 //! A multi-room chat server.
 
+use crate::errors::ShowMeErrors;
+use crate::ping_logs::logs::{GenericLog, tail_logs};
+use crate::{AppMutState, ConnId, JourneyId, Msg, TransactionId, add_to_rolling_buffer};
+use actix_web::web::Data;
+use rand::Rng as _;
+use reqwest::Client;
+use std::time::Duration;
 use std::{
   collections::{HashMap, HashSet},
   io,
@@ -8,14 +15,13 @@ use std::{
     atomic::{AtomicUsize, Ordering},
   },
 };
-
-use rand::Rng as _;
+use tantivy::schema::{STORED, Schema, TEXT};
+use tantivy::{Index, IndexReader, doc};
+use tempfile::TempDir;
 use tokio::sync::{mpsc, oneshot};
-
-use crate::{ConnId, Msg, RoomId};
+use tokio::time::sleep;
 
 /// A command received by the [`LogsServer`].
-#[derive(Debug)]
 enum Command {
   Connect {
     conn_tx: mpsc::UnboundedSender<Msg>,
@@ -27,15 +33,20 @@ enum Command {
   },
 
   List {
-    res_tx: oneshot::Sender<Vec<RoomId>>,
+    res_tx: oneshot::Sender<Vec<JourneyId>>,
   },
 
   Join {
     conn: ConnId,
-    room: RoomId,
+    room: JourneyId,
     res_tx: oneshot::Sender<()>,
   },
 
+  NewId {
+    transaction_id: TransactionId,
+    journey_id: JourneyId,
+    res_tx: oneshot::Sender<()>,
+  },
   Message {
     msg: Msg,
     conn: ConnId,
@@ -50,25 +61,16 @@ enum Command {
 /// Call and spawn [`run`](Self::run) to start processing commands.
 #[derive(Debug)]
 pub struct LogsServer {
-  /// Map of connection IDs to their message receivers.
   sessions: HashMap<ConnId, mpsc::UnboundedSender<Msg>>,
-
-  /// Map of room name to participant IDs in that room.
-  rooms: HashMap<RoomId, HashSet<ConnId>>,
-
-  /// Tracks total number of historical connections established.
-  visitor_count: Arc<AtomicUsize>,
-
-  /// Command receiver.
+  journey_watch: HashMap<JourneyId, HashSet<ConnId>>,
+  user_count: Arc<AtomicUsize>,
   cmd_rx: mpsc::UnboundedReceiver<Command>,
 }
 
 impl LogsServer {
   pub fn new() -> (Self, LogsServerHandle) {
-    // create empty server
     let mut rooms = HashMap::with_capacity(4);
 
-    // create default room
     rooms.insert("main".to_owned(), HashSet::new());
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -76,8 +78,8 @@ impl LogsServer {
     (
       Self {
         sessions: HashMap::new(),
-        rooms,
-        visitor_count: Arc::new(AtomicUsize::new(0)),
+        journey_watch: rooms,
+        user_count: Arc::new(AtomicUsize::new(0)),
         cmd_rx,
       },
       LogsServerHandle { cmd_tx },
@@ -88,7 +90,7 @@ impl LogsServer {
   ///
   /// `skip` is used to prevent messages triggered by a connection also being received by it.
   async fn send_system_message(&self, room: &str, skip: ConnId, msg: impl Into<Msg>) {
-    if let Some(sessions) = self.rooms.get(room) {
+    if let Some(sessions) = self.journey_watch.get(room) {
       let msg = msg.into();
 
       for conn_id in sessions {
@@ -102,13 +104,27 @@ impl LogsServer {
     }
   }
 
+  async fn send_new_transaction_id(&self, journey_id: JourneyId, transaction_id: TransactionId) {
+    let msg: Msg = (transaction_id, journey_id.clone()).into();
+    if let Some(sessions) = self.journey_watch.get(&journey_id) {
+      for conn_id in sessions {
+        if let Some(tx) = self.sessions.get(conn_id) {
+          let _ = tx.send(msg.clone());
+        }
+      }
+    }
+    for (_, tx) in &self.sessions {
+      let _ = tx.send(msg.clone());
+    }
+  }
+
   /// Send message to all other users in current room.
   ///
   /// `conn` is used to find current room and prevent messages sent by a connection also being
   /// received by it.
   async fn send_message(&self, conn: ConnId, msg: impl Into<Msg>) {
     if let Some(room) = self
-      .rooms
+      .journey_watch
       .iter()
       .find_map(|(room, participants)| participants.contains(&conn).then_some(room))
     {
@@ -128,9 +144,13 @@ impl LogsServer {
     self.sessions.insert(id, tx);
 
     // auto join session to main room
-    self.rooms.entry("main".to_owned()).or_default().insert(id);
+    self
+      .journey_watch
+      .entry("main".to_owned())
+      .or_default()
+      .insert(id);
 
-    let count = self.visitor_count.fetch_add(1, Ordering::SeqCst);
+    let count = self.user_count.fetch_add(1, Ordering::SeqCst);
     self
       .send_system_message("main", 0, format!("Total visitors {count}"))
       .await;
@@ -143,12 +163,12 @@ impl LogsServer {
   async fn disconnect(&mut self, conn_id: ConnId) {
     println!("Someone disconnected");
 
-    let mut rooms: Vec<RoomId> = Vec::new();
+    let mut rooms: Vec<JourneyId> = Vec::new();
 
     // remove sender
     if self.sessions.remove(&conn_id).is_some() {
       // remove session from all rooms
-      for (name, sessions) in &mut self.rooms {
+      for (name, sessions) in &mut self.journey_watch {
         if sessions.remove(&conn_id) {
           rooms.push(name.to_owned());
         }
@@ -164,16 +184,16 @@ impl LogsServer {
   }
 
   /// Returns list of created room names.
-  fn list_rooms(&mut self) -> Vec<RoomId> {
-    self.rooms.keys().cloned().collect()
+  fn list_rooms(&mut self) -> Vec<JourneyId> {
+    self.journey_watch.keys().cloned().collect()
   }
 
   /// Join room, send disconnect message to old room send join message to new room.
-  async fn join_room(&mut self, conn_id: ConnId, room: RoomId) {
+  async fn join_room(&mut self, conn_id: ConnId, room: JourneyId) {
     let mut rooms = Vec::new();
 
     // remove session from all rooms
-    for (n, sessions) in &mut self.rooms {
+    for (n, sessions) in &mut self.journey_watch {
       if sessions.remove(&conn_id) {
         rooms.push(n.to_owned());
       }
@@ -185,7 +205,11 @@ impl LogsServer {
         .await;
     }
 
-    self.rooms.entry(room.clone()).or_default().insert(conn_id);
+    self
+      .journey_watch
+      .entry(room.clone())
+      .or_default()
+      .insert(conn_id);
 
     self
       .send_system_message(&room, conn_id, "Someone connected")
@@ -198,6 +222,17 @@ impl LogsServer {
         Command::Connect { conn_tx, res_tx } => {
           let conn_id = self.connect(conn_tx).await;
           let _ = res_tx.send(conn_id);
+        }
+
+        Command::NewId {
+          journey_id,
+          transaction_id,
+          res_tx,
+        } => {
+          self
+            .send_new_transaction_id(journey_id, transaction_id)
+            .await;
+          let _ = res_tx.send(());
         }
 
         Command::Disconnect { conn } => {
@@ -245,7 +280,7 @@ impl LogsServerHandle {
   }
 
   /// List all created rooms.
-  pub async fn list_rooms(&self) -> Vec<RoomId> {
+  pub async fn list_journeys(&self) -> Vec<JourneyId> {
     let (res_tx, res_rx) = oneshot::channel();
 
     // unwrap: chat server should not have been dropped
@@ -256,7 +291,7 @@ impl LogsServerHandle {
   }
 
   /// Join `room`, creating it if it does not exist.
-  pub async fn join_room(&self, conn: ConnId, room: impl Into<RoomId>) {
+  pub async fn watch_journey(&self, conn: ConnId, room: impl Into<JourneyId>) {
     let (res_tx, res_rx) = oneshot::channel();
 
     // unwrap: chat server should not have been dropped
@@ -271,6 +306,21 @@ impl LogsServerHandle {
 
     // unwrap: chat server does not drop our response channel
     res_rx.await.unwrap();
+  }
+
+  pub async fn new_transaction_id(&self, journey_id: JourneyId, transaction_id: TransactionId) {
+    let (res_tx, res_rx) = oneshot::channel();
+
+    self
+      .cmd_tx
+      .send(Command::NewId {
+        journey_id,
+        transaction_id,
+        res_tx,
+      })
+      .unwrap();
+
+    res_rx.await.unwrap()
   }
 
   /// Broadcast message to current room.
