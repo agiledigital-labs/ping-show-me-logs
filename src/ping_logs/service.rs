@@ -1,6 +1,6 @@
-use crate::AppMutState;
 use crate::errors::ShowMeErrors;
 use crate::ping_logs::logs::{Level, Logs, get_logs};
+use crate::{AppMutState, TransactionIdWs};
 use actix_web::web::Query;
 use actix_web::{Responder, get, post, web};
 use reqwest::Client;
@@ -34,16 +34,14 @@ struct ScriptLogs {
 #[get("/transaction/ids")]
 async fn list_transaction_ids(
   data: web::Data<AppMutState>,
-) -> Result<web::Json<Vec<String>>, crate::errors::ShowMeErrors> {
-  let rolling_list: Vec<String> = data
+) -> Result<web::Json<Vec<TransactionIdWs>>, crate::errors::ShowMeErrors> {
+  let rolling_list = data
     .rolling_id_list
     .lock()
     .map_err(|_| ShowMeErrors::IdLockError("failed".to_string()))?
     .iter()
     .cloned()
     .collect();
-
-  dbg!(&rolling_list);
 
   Ok(web::Json(rolling_list))
 }

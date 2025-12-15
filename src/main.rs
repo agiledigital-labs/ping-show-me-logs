@@ -37,7 +37,7 @@ pub type ConnId = u64;
 pub type JourneyId = String;
 pub type TransactionId = String;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct TransactionIdWs {
   id: TransactionId,
   journey: JourneyId,
@@ -76,18 +76,22 @@ impl From<(TransactionId, JourneyId)> for WsMsg {
 /// Message sent to a room/client.
 pub type Msg = WsMsg;
 
-fn add_to_rolling_buffer(deque: &Mutex<VecDeque<String>>, value: String) -> Option<()> {
+fn add_to_rolling_buffer(
+  deque: &Mutex<VecDeque<TransactionIdWs>>,
+  value: impl Into<TransactionIdWs>,
+) -> Option<()> {
   match deque
     .lock()
     .map_err(|_| ShowMeErrors::IdLockError("Failed to lock id vec".to_string()))
   {
     Ok(mut locked_queue) => {
-      if !locked_queue.contains(&value) {
+      let local_value = value.into();
+      if !locked_queue.contains(&local_value) {
         if locked_queue.len() == MAX_SIZE {
           locked_queue.pop_front();
         }
-        println!("{}, {}", locked_queue.len(), &value);
-        locked_queue.push_back(value);
+        println!("Transaction queue length: {}.", locked_queue.len());
+        locked_queue.push_back(local_value);
         Some(())
       } else {
         None
@@ -107,7 +111,7 @@ struct AppMutState {
   key: String,
   log: String,
   script_config: Mutex<HashMap<String, ScriptConfig>>,
-  rolling_id_list: Mutex<VecDeque<String>>,
+  rolling_id_list: Mutex<VecDeque<TransactionIdWs>>,
 }
 
 // this could be done with rust embed

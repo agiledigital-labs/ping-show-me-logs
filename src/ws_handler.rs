@@ -11,7 +11,8 @@ use tokio::{sync::mpsc, time::interval};
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long before lack of client response causes a timeout
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(100);
+const PING_TIME: Duration = Duration::from_secs(5);
 
 /// Echo text & binary messages received from the client, respond to ping messages, and monitor
 /// connection health to detect network issues and free up resources.
@@ -48,7 +49,6 @@ pub async fn chat_ws(
                 }
 
                 AggregatedMessage::Pong(t) => {
-                    println!("{}", format!("Go a pong message: {:?}", t));
                     last_heartbeat = Instant::now();
                 }
 
@@ -72,8 +72,9 @@ pub async fn chat_ws(
         _ = interval.tick() => {
             if Instant::now().duration_since(last_heartbeat) > CLIENT_TIMEOUT {
                 break None;
-            }
-            let _ = session.ping(b"").await;
+            } else if Instant::now().duration_since(last_heartbeat) > PING_TIME {
+            let _ = session.ping(b"pong").await;
+          }
         }
 
         else => {

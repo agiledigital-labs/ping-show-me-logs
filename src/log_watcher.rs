@@ -1,7 +1,7 @@
 use crate::errors::ShowMeErrors;
 use crate::ping_logs::logs::{GenericLog, tail_logs};
 use crate::ws_server::LogsServerHandle;
-use crate::{AppMutState, add_to_rolling_buffer};
+use crate::{AppMutState, TransactionIdWs, add_to_rolling_buffer};
 use actix_web::web::Data;
 use reqwest::Client;
 use std::path::Path;
@@ -97,21 +97,40 @@ impl LogWatcher {
                 doc!(transaction_id_schema => t.payload.transaction_id.split_at(36).0),
               )?;
               let id = t.payload.transaction_id.split_at(36).0.to_string();
-              let is_new = add_to_rolling_buffer(&self.app_data.rolling_id_list, id.clone());
-              if is_new.is_some() { Some(id) } else { None }
+              let journey: Option<String> = match t.payload.entries.clone() {
+                None => None,
+                Some(t) => t
+                  .iter()
+                  .filter(|t| t.info.tree_name.is_some())
+                  .map(|t| t.info.tree_name.clone())
+                  .collect::<Vec<Option<String>>>()
+                  .first()
+                  .unwrap_or(&None)
+                  .clone(),
+              };
+
+              let transaction_id =
+                TransactionIdWs::from_tuple((id.clone(), journey.clone().unwrap_or_default()));
+              let is_new = if journey.is_some() {
+                add_to_rolling_buffer(&self.app_data.rolling_id_list, transaction_id.clone())
+              } else {
+                None
+              };
+              if is_new.is_some() {
+                Some(transaction_id)
+              } else {
+                None
+              }
             }
             _t => None,
           };
           Ok(res)
         })
-        .collect::<Result<Vec<Option<String>>, ShowMeErrors>>()?;
+        .collect::<Result<Vec<Option<TransactionIdWs>>, ShowMeErrors>>()?;
 
       for doc in docs {
         if let Some(t) = doc {
-          self
-            .server_tx
-            .new_transaction_id("".to_string(), t.clone())
-            .await;
+          self.server_tx.new_transaction_id(t.journey, t.id).await;
         }
       }
 

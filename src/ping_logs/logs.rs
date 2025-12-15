@@ -20,6 +20,7 @@ pub enum Level {
 #[serde(rename_all = "camelCase")]
 pub struct NodeOutcomeInfo {
   node_extra_logging: Option<serde_json::Map<String, serde_json::Value>>,
+  pub tree_name: Option<String>,
   node_id: String,
   pub(crate) node_outcome: String,
   pub(crate) display_name: String,
