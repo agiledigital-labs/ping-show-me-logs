@@ -133,7 +133,7 @@ struct JourneyFilter {
 }
 
 #[get("")]
-async fn get_journey(
+async fn get_journeys(
   data: web::Data<AppMutState>,
   query: Query<JourneyFilter>,
 ) -> Result<web::Json<Vec<String>>, ShowMeErrors> {
@@ -269,7 +269,7 @@ pub fn trees_api(cfg: &mut web::ServiceConfig) {
     web::scope("/journey")
       .service(journey_flow)
       .service(journey_script)
-      .service(get_journey)
+      .service(get_journeys)
       .service(list_scripts)
       .service(get_journey_transactions),
   );

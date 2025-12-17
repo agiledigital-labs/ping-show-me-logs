@@ -154,7 +154,7 @@ async fn main() -> Result<(), ShowMeErrors> {
 
   let state = web::Data::new(AppMutState {
     transaction_id: Mutex::new(String::new()),
-    authentication_tree,
+    authentication_tree: authentication_tree.clone(),
     token,
     token_str: token_mux,
     payload: Mutex::new(payload_up),
@@ -188,7 +188,7 @@ async fn main() -> Result<(), ShowMeErrors> {
     Ok::<(), ShowMeErrors>(())
   });
 
-  let (logs_server, server_tx) = LogsServer::new();
+  let (logs_server, server_tx) = LogsServer::new(authentication_tree);
   let watcher_state = state.clone();
   let (watcher, reader, schema) = LogWatcher::new(server_tx.clone(), watcher_state)?;
   let log_command_server = spawn(logs_server.run());

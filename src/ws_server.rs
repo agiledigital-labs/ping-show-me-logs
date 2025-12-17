@@ -2,6 +2,7 @@
 
 use crate::errors::ShowMeErrors;
 use crate::ping_logs::logs::{GenericLog, tail_logs};
+use crate::trees::journeys::AuthenticationTreeList;
 use crate::{AppMutState, ConnId, JourneyId, Msg, TransactionId, add_to_rolling_buffer};
 use actix_web::web::Data;
 use rand::Rng as _;
@@ -65,10 +66,11 @@ pub struct LogsServer {
   journey_watch: HashMap<JourneyId, HashSet<ConnId>>,
   user_count: Arc<AtomicUsize>,
   cmd_rx: mpsc::UnboundedReceiver<Command>,
+  authentication_tree_list: AuthenticationTreeList,
 }
 
 impl LogsServer {
-  pub fn new() -> (Self, LogsServerHandle) {
+  pub fn new(authentication_tree_list: AuthenticationTreeList) -> (Self, LogsServerHandle) {
     let mut rooms = HashMap::with_capacity(4);
 
     rooms.insert("main".to_owned(), HashSet::new());
@@ -81,6 +83,7 @@ impl LogsServer {
         journey_watch: rooms,
         user_count: Arc::new(AtomicUsize::new(0)),
         cmd_rx,
+        authentication_tree_list,
       },
       LogsServerHandle { cmd_tx },
     )
@@ -106,15 +109,13 @@ impl LogsServer {
 
   async fn send_new_transaction_id(&self, journey_id: JourneyId, transaction_id: TransactionId) {
     let msg: Msg = (transaction_id, journey_id.clone()).into();
+    println!("{}", journey_id);
     if let Some(sessions) = self.journey_watch.get(&journey_id) {
       for conn_id in sessions {
         if let Some(tx) = self.sessions.get(conn_id) {
           let _ = tx.send(msg.clone());
         }
       }
-    }
-    for (_, tx) in &self.sessions {
-      let _ = tx.send(msg.clone());
     }
   }
 
@@ -185,25 +186,23 @@ impl LogsServer {
 
   /// Returns list of created room names.
   fn list_rooms(&mut self) -> Vec<JourneyId> {
-    self.journey_watch.keys().cloned().collect()
+    self.authentication_tree_list.get_tree_list()
+    // self.journey_watch.keys().cloned().collect()
   }
 
   /// Join room, send disconnect message to old room send join message to new room.
   async fn join_room(&mut self, conn_id: ConnId, room: JourneyId) {
-    let mut rooms = Vec::new();
-
-    // remove session from all rooms
-    for (n, sessions) in &mut self.journey_watch {
-      if sessions.remove(&conn_id) {
-        rooms.push(n.to_owned());
+    if room.eq("all") {
+      println!("all rooms");
+      for room in self.authentication_tree_list.get_tree_list() {
+        self
+          .journey_watch
+          .entry(room.clone())
+          .or_default()
+          .insert(conn_id);
       }
-    }
-    // send message to other users
-    for room in rooms {
-      self
-        .send_system_message(&room, 0, "Someone disconnected")
-        .await;
-    }
+      return;
+    };
 
     self
       .journey_watch

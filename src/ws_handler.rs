@@ -5,6 +5,7 @@ use crate::ws_server::LogsServerHandle;
 use crate::{ConnId, Msg, WsMsg};
 use actix_ws::AggregatedMessage;
 use futures_util::StreamExt as _;
+use serde_json::json;
 use tokio::{sync::mpsc, time::interval};
 
 /// How often heartbeat pings are sent
@@ -66,7 +67,7 @@ pub async fn chat_ws(
         }
 
         Some(chat_msg) = conn_rx.recv() => {
-             session.text(serde_json::to_string(&chat_msg).unwrap_or_default()).await.unwrap();
+             session.text(serde_json::to_string(&chat_msg).unwrap_or_default()).await.unwrap_or_default();
         }
 
         _ = interval.tick() => {
@@ -85,7 +86,7 @@ pub async fn chat_ws(
 
   chat_server.disconnect(conn_id);
 
-  // attempt to close connection gracefully
+  // attempt to close the connection gracefully
   let _ = session.close(close_reason).await;
 }
 
@@ -109,10 +110,14 @@ async fn process_text_msg(
         log::info!("conn {conn}: listing rooms");
 
         let rooms = chat_server.list_journeys().await;
+        let payload = &json!({
+          "command": "list",
+          "journeys": &rooms});
 
-        for room in rooms {
-          session.text(room).await.unwrap();
-        }
+        session
+          .text(serde_json::to_string(payload).unwrap())
+          .await
+          .unwrap();
       }
 
       "/join" => match cmd_args.next() {

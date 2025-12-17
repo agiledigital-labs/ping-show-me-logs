@@ -66,27 +66,22 @@ impl LogWatcher {
     let client = Client::new();
     let mut cookie: Option<String> = None;
 
-    println!("1");
-
     let mut index_writer = self.logs_index.clone().writer(50_000_000).map_err(|t| {
       dbg!(t.clone());
       <TantivyError as Into<ShowMeErrors>>::into(t)
     })?;
     // .map_err(Into::<ShowMeErrors>::into)?;
 
-    println!("2");
     let transaction_id_schema = self
       .logs_schema
       .get_field("transactionId")
       .map_err(Into::<ShowMeErrors>::into)?;
 
-    println!("3");
     loop {
       let logs = tail_logs(&client, &self.app_data, cookie, None).await?;
 
       cookie = logs.paged_result_cooke;
 
-      println!("{:?}", cookie);
       let docs = logs
         .result
         .iter()
