@@ -10,9 +10,9 @@ import ListItemButton from "@mui/material/ListItemButton";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
 import "@xyflow/react/dist/style.css";
-import {type ReactNode, useEffect, useReducer, useState} from "react";
-import {Link, useSearchParams} from "react-router";
-import {AppSharedContext} from "./Contexts.tsx";
+import { type ReactNode, useEffect, useReducer, useState } from "react";
+import { Link, useSearchParams } from "react-router";
+import { AppSharedContext } from "./Contexts.tsx";
 
 const DrawerList = ({
   toggleDrawer,
@@ -98,9 +98,11 @@ const AppNav = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const ws = new WebSocket("ws://localhost:8081/api/ws");
     dispatch(makeSteWebSocket(ws));
-    ws.onopen = () => console.info("connected to server");
+    ws.onopen = () => {
+      console.info("connected to server");
+    };
     ws.onmessage = (event) => {
-      console.info(event.data);
+      console.info(event);
     };
     ws.onclose = () => console.log("Disconnected");
     return () => ws.close();
@@ -129,6 +131,21 @@ const AppNav = ({ children }: { children: ReactNode }) => {
           <DrawerList toggleDrawer={toggleDrawer} />
         </Drawer>
         <>{children}</>
+        {/* Persistent bottom-left logo on every screen */}
+        <img
+          src={"/14386_Agile_Logo_2lines_CMYK-transparent-500px.png"}
+          alt="Agile Digital logo"
+          style={{
+            position: "fixed",
+            left: 12,
+            bottom: 12,
+            width: 120,
+            height: "auto",
+            opacity: 0.9,
+            pointerEvents: "none",
+            zIndex: 9999,
+          }}
+        />
       </div>
     </AppSharedContext>
   );
