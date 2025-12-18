@@ -2,7 +2,6 @@ use crate::errors::ShowMeErrors;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use futures_util::future::JoinAll;
 
 #[derive(Deserialize)]
 pub struct ScriptListRoot {
@@ -54,7 +53,7 @@ pub struct Outcomes {
   pub default: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone )]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct Script {
   pub title: String,
   pub description: String,
@@ -104,7 +103,7 @@ impl From<(String, String, String)> for ScriptConfig {
   }
 }
 
-#[derive(Serialize, Clone )]
+#[derive(Serialize, Clone)]
 pub struct RichScript {
   name: String,
   id: String,

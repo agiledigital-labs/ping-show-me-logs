@@ -8,8 +8,7 @@ use std::fs;
 use std::ops::Add;
 use std::sync::Mutex;
 
-#[derive(Serialize, Clone)]
-#[derive(Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub(crate) struct Payload {
   iss: String,
   sub: String,
@@ -55,12 +54,13 @@ pub async fn get_usable_token(
     .lock()
     .map_err(|_| ShowMeErrors::SharedLocking("token".to_string()))?;
 
-  let locked_payload = payload.lock().map_err(|_| ShowMeErrors::SharedLocking("payload".to_string()))?.clone();
+  let locked_payload = payload
+    .lock()
+    .map_err(|_| ShowMeErrors::SharedLocking("payload".to_string()))?
+    .clone();
 
   if !need_new_exp {
-
     Ok((locked_string.clone(), locked_payload))
-
   } else {
     let old_payload = payload;
 
