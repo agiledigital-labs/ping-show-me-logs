@@ -1,9 +1,9 @@
 use crate::errors::ShowMeErrors;
-use crate::ping_logs::logs::{ResultingLog, get_logs};
+use crate::ping_logs::logs::{GenericLog, get_logs};
 use crate::token::get_usable_token;
 use crate::trees::journeys::{ReactFlowEdge, ReactFlowNode};
 use crate::trees::nodes::{NodeConfig, NodeData};
-use crate::workers::scripts::{RichScript, ScriptConfig};
+use crate::workers::scripts::ScriptConfig;
 use crate::{AppMutState, NodeOutcomeEdge};
 use actix_web::web::Query;
 use actix_web::{get, web};
@@ -12,7 +12,6 @@ use futures_util::future;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 
 #[derive(Deserialize)]
 struct JourneyFlowQuery {
@@ -29,7 +28,7 @@ async fn journey_flow(
   let tree = data.authentication_tree.get_tree(&name);
 
   let node_outcomes = (match transaction_id {
-    Some(id) => get_node_outcomes(id).await,
+    Some(id) => get_node_outcomes(id, data).await,
     None => Ok(vec![]),
   })
   .unwrap_or(vec![]);
@@ -45,7 +44,7 @@ async fn journey_flow(
   }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct JourneyTransaction {
   transaction_id: String,
   timestamp: DateTime<Utc>,
@@ -64,13 +63,14 @@ async fn list_scripts(
   Ok(web::Json(saved_scripts))
 }
 
-
 #[get("/{name}/transactions")]
 async fn get_journey_transactions(
   journey_name: web::Path<String>,
+  data: web::Data<AppMutState>,
 ) -> Result<web::Json<Vec<JourneyTransaction>>, ShowMeErrors> {
   let journey_transactions = get_logs(
     &Client::new(),
+    &data,
     "", // Blank transaction ID effectively runs a * search.
     Some(
       format!(
@@ -87,9 +87,15 @@ async fn get_journey_transactions(
       transactions
         .result
         .iter()
-        .map(|log| JourneyTransaction {
-          timestamp: log.timestamp,
-          transaction_id: log.payload.transaction_id.clone(),
+        .map(|log| match log {
+          GenericLog::ResultingLog(ll) => JourneyTransaction {
+            timestamp: ll.timestamp,
+            transaction_id: ll.payload.transaction_id.clone(),
+          },
+          GenericLog::Other(ll) => {
+            dbg!(ll);
+            JourneyTransaction::default()
+          }
         })
         .collect(),
     )),
@@ -127,7 +133,7 @@ struct JourneyFilter {
 }
 
 #[get("")]
-async fn get_journey(
+async fn get_journeys(
   data: web::Data<AppMutState>,
   query: Query<JourneyFilter>,
 ) -> Result<web::Json<Vec<String>>, ShowMeErrors> {
@@ -166,12 +172,16 @@ async fn get_journey(
   Ok(web::Json(tree_list))
 }
 
-async fn get_node_outcomes(transaction_id: &str) -> Result<Vec<NodeOutcomeEdge>, ShowMeErrors> {
+async fn get_node_outcomes(
+  transaction_id: &str,
+  data: web::Data<AppMutState>,
+) -> Result<Vec<NodeOutcomeEdge>, ShowMeErrors> {
   let client = &Client::new();
 
   // Get latest node outcomes with tracking IDs
   let most_recent_transaction_logs = get_logs(
     client,
+    &data,
     &transaction_id,
     Some("/payload/entries/info/nodeOutcome pr"),
   )
@@ -181,7 +191,12 @@ async fn get_node_outcomes(transaction_id: &str) -> Result<Vec<NodeOutcomeEdge>,
   let mut tracking_ids: Vec<String> = most_recent_transaction_logs
     .clone()
     .iter()
-    .flat_map(|log| log.payload.tracking_ids.clone())
+    .flat_map(|l| match l {
+      GenericLog::ResultingLog(log) => log.payload.tracking_ids.clone(),
+      GenericLog::Other(_) => {
+        vec![]
+      }
+    })
     .collect::<HashSet<_>>()
     .into_iter()
     .collect();
@@ -191,31 +206,35 @@ async fn get_node_outcomes(transaction_id: &str) -> Result<Vec<NodeOutcomeEdge>,
   let async_logs = future::join_all(if !tracking_ids.is_empty() {
     tracking_ids
       .into_iter() // takes ownership of each String
-      .map(|tracking_id| async move {
-        println!(
-          "Getting logs for additional tracking ID [{:?}]...",
-          tracking_id
-        );
-
-        let some_logs = get_logs(
-          client,
-          "",
-          Some(&format!(
-            "/payload/trackingIds eq \"{}\" and /payload/entries/info/nodeOutcome pr",
+      .map(|tracking_id| {
+        let local_state = data.clone();
+        async move {
+          println!(
+            "Getting logs for additional tracking ID [{:?}]...",
             tracking_id
-          )),
-        )
-        .await;
+          );
 
-        let final_logs = some_logs.map_or(vec![], |some_logs| some_logs.result);
+          let some_logs = get_logs(
+            client,
+            &local_state,
+            "",
+            Some(&format!(
+              "/payload/trackingIds eq \"{}\" and /payload/entries/info/nodeOutcome pr",
+              tracking_id
+            )),
+          )
+          .await;
 
-        println!(
-          "Got  [{:?}] logs for tracking ID [{:?}].",
-          final_logs.len(),
-          tracking_id,
-        );
+          let final_logs = some_logs.map_or(vec![], |some_logs| some_logs.result);
 
-        final_logs
+          println!(
+            "Got  [{:?}] logs for tracking ID [{:?}].",
+            final_logs.len(),
+            tracking_id,
+          );
+
+          final_logs
+        }
       })
       .collect()
   } else {
@@ -224,19 +243,21 @@ async fn get_node_outcomes(transaction_id: &str) -> Result<Vec<NodeOutcomeEdge>,
   .await;
 
   // Perform query for all other node outcomes in the journey with the tracking ID
-  let all_transaction_logs: Vec<&ResultingLog> =
+  let all_transaction_logs: Vec<&GenericLog> =
     async_logs.iter().flat_map(|results| results).collect();
 
   Ok(
     all_transaction_logs
       .iter()
-      .map(|log| {
-        let thing = &log.payload.entries.clone().unwrap_or(vec![])[0];
-
-        NodeOutcomeEdge {
-          name: thing.info.display_name.clone(),
-          outcome: thing.info.node_outcome.clone(),
+      .map(|log| match log {
+        GenericLog::ResultingLog(ll) => {
+          let thing = &ll.payload.entries.clone().unwrap_or(vec![])[0];
+          NodeOutcomeEdge {
+            name: thing.info.display_name.clone(),
+            outcome: thing.info.node_outcome.clone(),
+          }
         }
+        GenericLog::Other(_) => NodeOutcomeEdge::default(),
       })
       .collect(),
   )
@@ -248,7 +269,7 @@ pub fn trees_api(cfg: &mut web::ServiceConfig) {
     web::scope("/journey")
       .service(journey_flow)
       .service(journey_script)
-      .service(get_journey)
+      .service(get_journeys)
       .service(list_scripts)
       .service(get_journey_transactions),
   );

@@ -1,3 +1,5 @@
 /target
 .envrc
 key.json
+/vscode-ext-poc/node_modules/
+/vscode-ext-poc/out/
