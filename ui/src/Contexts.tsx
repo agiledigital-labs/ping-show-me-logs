@@ -1,5 +1,7 @@
 import { createContext } from "react";
 
-export const AppSharedContext = createContext<{ location: string }>({
+export const AppSharedContext = createContext<{
+  location: string;
+}>({
   location: "web",
 });
