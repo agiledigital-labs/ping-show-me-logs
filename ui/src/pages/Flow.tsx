@@ -3,31 +3,25 @@ import {
   FormControl,
   Grid,
   InputLabel,
+  ListSubheader,
   MenuItem,
   Select,
-  TextField,
 } from "@mui/material";
+import List from "@mui/material/List";
+import ListItemButton from "@mui/material/ListItemButton";
+import ListItemText from "@mui/material/ListItemText";
 import {
   ReactFlow,
   ReactFlowProvider,
   useOnSelectionChange,
 } from "@xyflow/react";
 import { type Dispatch, useEffect, useReducer, useState } from "react";
-import { Controller, useForm } from "react-hook-form";
 import "./Flow.css";
-import { useSearchParams } from "react-router";
 import useSWR from "swr";
 import * as z from "zod";
 import { PingNode } from "./custom/CustomNodes.tsx";
 import { Log } from "./custom/Logs.tsx";
 import { jsonFetcher } from "./helpers.ts";
-
-type Inputs = {
-  selectedTree?: string;
-  startsWith?: string;
-  endsWith?: string;
-  contains?: string;
-};
 
 const nodeTypes = {
   ping: PingNode,
@@ -91,7 +85,7 @@ const reducer = (state: State, action: Actions) => {
         ...state,
         flow: {
           ...state.flow,
-          [journey]: [...(state.flow[journey] ?? []), transaction],
+          [journey]: [transaction, ...(state.flow[journey] ?? [])],
         },
         transactions: {
           ...state.transactions,
@@ -126,44 +120,36 @@ const FlowInner = ({
   dispatch: Dispatch<Actions>;
   ws?: WebSocket;
 }) => {
-  console.log(state, typeof dispatch);
-  const [searchParams] = useSearchParams();
-  const values = {
-    startsWith: searchParams.get("startsWith") ?? undefined,
-    endsWith: searchParams.get("endsWith") ?? undefined,
-    container: searchParams.get("container") ?? undefined,
-    selectedTree: searchParams.get("selectedJourney") ?? undefined,
-  };
-  const { watch, control } = useForm<Inputs>({ defaultValues: values });
-
-  const urlSearch = new URLSearchParams({
-    starts_with: watch("startsWith") ?? "",
-    contains: watch("contains") ?? "",
-  });
+  const [selectedJourney, setJourney] = useState<string>();
 
   const { data: journeyList } = useSWR(
-    `${document.URL.includes("5173") ? "http://localhost:8081" : ""}/api/journey?${urlSearch.toString()}`,
+    `${document.URL.includes("5173") ? "http://localhost:8081" : ""}/api/journey`,
     jsonFetcher,
   );
-
-  const selectedJourney = watch("selectedTree");
 
   const [selectedNode, setSelectedNode] = useState<string>();
   const [transactionId, setTransactionId] = useState<string>();
 
-  const stateForJourney = selectedJourney ? state.flow[selectedJourney] : [];
-  console.log(stateForJourney);
+  const [transationsForSelectedJoruney, setTransForSelected] = useState<
+    string[]
+  >([]);
+
+  useEffect(() => {
+    const stateForJourney = selectedJourney ? state.flow[selectedJourney] : [];
+    setTransForSelected(stateForJourney ?? []);
+    setTransactionId(stateForJourney[0]);
+  }, [state.flow]);
+  console.log(selectedJourney, transationsForSelectedJoruney);
   useEffect(() => {
     if (selectedJourney) {
       dispatch({ type: "WatchJourney", msg: { journeyId: selectedJourney } });
-      ws.send(`/join ${selectedJourney}`);
+
+      console.log(ws?.readyState, selectedJourney);
+      if (ws !== undefined && ws.readyState === WebSocket.OPEN) {
+        ws?.send(`/join ${selectedJourney}`);
+      }
     }
-    const lastIndex = stateForJourney?.length - 1;
-    if (lastIndex >= 0) {
-      console.log(stateForJourney[lastIndex], lastIndex, stateForJourney);
-      setTransactionId(stateForJourney[lastIndex]);
-    }
-  }, [selectedJourney, stateForJourney]);
+  }, [selectedJourney, ws, ws?.readyState]);
 
   useOnSelectionChange({
     onChange: (data) => {
@@ -214,6 +200,18 @@ const FlowInner = ({
       revalidateOnFocus: false,
     },
   );
+
+  useEffect(() => {
+    if (selectedJourney !== undefined) {
+      dispatch({
+        type: "BulkSetTransactionIds",
+        msg: {
+          transactionIds: journeyTransactions ?? [],
+          journeyId: selectedJourney,
+        },
+      });
+    }
+  }, [journeyTransactions]);
 
   const { data: journeyScripts } = useSWR(
     selectedJourney === undefined
@@ -269,23 +267,24 @@ const FlowInner = ({
       spacing={1}
       style={{ display: "flex", flexDirection: "row" }}
     >
-      <Grid size={3}>
-        <FormControl fullWidth>
-          <InputLabel id={"transaction-id"}>Select Transaction Id</InputLabel>
-          <Select
-            labelId={"transaction-id"}
-            value={transactionId}
-            onChange={(event) => setTransactionId(event.target.value)}
-          >
-            {[...(stateForJourney ?? []), ...(journeyTransactions ?? [])].map(
-              (transactionId, i) => (
-                <MenuItem key={i} value={transactionId}>
-                  {transactionId}
-                </MenuItem>
-              ),
-            )}
-          </Select>
-        </FormControl>
+      <Grid size={3} style={{ height: "95vh", overflowY: "auto" }}>
+        <List
+          style={{ overflowY: "auto" }}
+          subheader={
+            <ListSubheader component="div" id="nested-list-subheader">
+              TransactionIds
+            </ListSubheader>
+          }
+        >
+          {transationsForSelectedJoruney.map((transactionId, i) => (
+            <ListItemButton
+              key={`transaction-list-${i}`}
+              onClick={() => setTransactionId(transactionId)}
+            >
+              <ListItemText primary={transactionId} />
+            </ListItemButton>
+          ))}
+        </List>
         <div style={{ padding: "30px" }}>
           {scriptLogs &&
             scriptLogs.result
@@ -301,50 +300,20 @@ const FlowInner = ({
       <Grid size={9}>
         <Grid container>
           <Grid size={12}>
-            <Box component={"form"} sx={{ display: "flex", flexWrap: "wrap" }}>
-              <FormControl fullWidth>
-                <Controller
-                  name="selectedTree"
-                  control={control}
-                  render={({ field }) => (
-                    <>
-                      <InputLabel id={"tree-select"}>Select Journey</InputLabel>
-                      <Select {...field} labelId={"tree-select"}>
-                        {((journeyList as string[]) ?? [])
-                          .sort()
-                          .map((name, i) => (
-                            <MenuItem key={`tree-${i}`} value={name}>
-                              {name}
-                            </MenuItem>
-                          ))}
-                      </Select>
-                    </>
-                  )}
-                />
-              </FormControl>
-              <Controller
-                name={"startsWith"}
-                control={control}
-                render={({ field }) => (
-                  <>
-                    <TextField
-                      label={"Starts With"}
-                      id={"starts-with"}
-                      {...field}
-                    />
-                  </>
-                )}
-              />
-              <Controller
-                name={"contains"}
-                control={control}
-                render={({ field }) => (
-                  <>
-                    <TextField label={"Contains"} id={"contains"} {...field} />
-                  </>
-                )}
-              />
-            </Box>
+            <FormControl fullWidth>
+              <InputLabel id={"tree-select"}>Select Journey</InputLabel>
+              <Select
+                value={selectedJourney}
+                onChange={(e) => setJourney(e.target.value)}
+                labelId={"tree-select"}
+              >
+                {((journeyList as string[]) ?? []).sort().map((name, i) => (
+                  <MenuItem key={`tree-${i}`} value={name}>
+                    {name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
           </Grid>
           <Grid size={12} height={"80vh"}>
             <Box
@@ -444,16 +413,6 @@ const Flow = () => {
     ws.onclose = () => console.log("Disconnected");
     return () => ws.close();
   }, []);
-
-  useEffect(() => {
-    if (wsState !== undefined && wsState.readyState === WebSocket.OPEN) {
-      try {
-        wsState.send("/join all");
-      } catch (e) {
-        console.error(e);
-      }
-    }
-  }, [wsState, wsState?.readyState]);
 
   return (
     <ReactFlowProvider>
