@@ -13,7 +13,7 @@ actix-cors = "0.7.1"
 openssl = {version = "0.10.74", features = ["vendored"]}
 thiserror = "2.0.17"
 jsonwebkey = {version = "0.3.5", features = ["jsonwebtoken", "jwt-convert", "generate"]}
-jsonwebtoken = { version = "8.3.0"   }
+jsonwebtoken = { version = "10.0.0"   }
 actix-ws = "0.3.0"
 futures-util = "0.3.31"
 futures = "0.3.31"
